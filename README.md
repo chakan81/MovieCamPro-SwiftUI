@@ -25,9 +25,9 @@ You can configure following features manually in SwiftUI environment.
 
 2. Add these properties to your info.plist
 
-    > Privacy - Camera Usage Description
-    > Privacy - Michrophoe Usage Description
-    > Privacy - Photo Library Additions Usage Description
+    > Privacy - Camera Usage Description    
+    > Privacy - Michrophoe Usage Description    
+    > Privacy - Photo Library Additions Usage Description   
 
 
 3. implement CameraService
@@ -44,10 +44,10 @@ You can configure following features manually in SwiftUI environment.
     </code>
     </pre>
     a. you can use only 4 dimensions.
-    > CMVideoDimensions(width: 3840, height: 2160)
-    > CMVideoDimensions(width: 1920, height: 1080)
-    > CMVideoDimensions(width: 1280, height: 720)
-    > CMVideoDimensions(width: 640, height: 480)
+    > CMVideoDimensions(width: 3840, height: 2160)  
+    > CMVideoDimensions(width: 1920, height: 1080)  
+    > CMVideoDimensions(width: 1280, height: 720)   
+    > CMVideoDimensions(width: 640, height: 480)    
 
     b. frameRate > 60 will be a slo-mo movie.
     

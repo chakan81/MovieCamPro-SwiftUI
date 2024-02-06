@@ -33,12 +33,16 @@ extension AVCaptureDevice {
     struct ScoredFormat {
         let format: AVCaptureDevice.Format
         let score: Int
+        let dimensionScore: Int
+        let frameRateScore: Int
         let isVideoHDRSupported: Bool
         let isDolbySupported: Bool
         
-        init(format: AVCaptureDevice.Format, score: Int, isVideoHDRSupported: Bool, isDolbySupported: Bool) {
+        init(format: AVCaptureDevice.Format, score: Int, dimensionScore: Int, frameRateScore: Int, isVideoHDRSupported: Bool, isDolbySupported: Bool) {
             self.format = format
             self.score = score
+            self.dimensionScore = dimensionScore
+            self.frameRateScore = frameRateScore
             self.isVideoHDRSupported = isVideoHDRSupported
             self.isDolbySupported = isDolbySupported
         }
@@ -56,11 +60,27 @@ extension AVCaptureDevice {
         return
     }
     
-    func scoreAndSortFormats() -> [ScoredFormat] {
+    func findProperFormat(scoredFormats: [ScoredFormat], dimension: CMVideoDimensions, frameRate: Double) throws -> AVCaptureDevice.Format? {
+        let dimensionScore = self.getDimensionScore(dimension: dimension)
+        
+        if dimensionScore == 0 {
+            throw AVCaptureDeviceError.invalidVideoDimensions
+        }
+        
+        guard let scoredFormat = try scoredFormats.first(where: { scoredFormat in
+            try scoredFormat.dimensionScore <= dimensionScore && self.checkFrameRate(format: scoredFormat.format, frameRate: frameRate)
+        }) else {
+            return nil
+        }
+        
+        return scoredFormat.format
+    }
+    
+    func scoreAndSortFormats(dolbyOn: Bool) -> [ScoredFormat] {
         var scoredFormats: [ScoredFormat] = []
         
         for i in 0...formats.count - 1 {
-            let scoredFormat = scoreFormat(format: formats[i])
+            let scoredFormat = scoreFormat(format: formats[i], dolbyOn: dolbyOn)
             
             scoredFormats.append(scoredFormat)
         }
@@ -70,30 +90,31 @@ extension AVCaptureDevice {
         return scoredFormats
     }
     
-    func printFormatArray(formats: [Format]) {
+    func printFormatArray(formats: [Format], useFormatInfo: Bool) {
         for i in 0...formats.count - 1 {
             let formatInfo: FormatInfo = FormatInfo(format: formats[i])
-            print("Formats[\(i)]\n\(formatInfo.convertFormatInfoToString())")
+            if useFormatInfo {
+                print("Formats[\(i)]\n\(formatInfo.convertFormatInfoToString())")
+            } else {
+                print("Formats[\(i)], \(formats[i].description)")
+            }
         }
     }
     
-    func printAllAvailableFormats() -> Void {
-        printFormatArray(formats: self.formats)
-    }
-    
-    func scoreFormat(format: Format) -> ScoredFormat {
+    func scoreFormat(format: Format, dolbyOn: Bool) -> ScoredFormat {
         var totalScore: Int = 0
         var isVideoHDRSupported: Bool = false
         var isDolbySupported: Bool = false
         
-        let dimensionScore: Int = getDimensionScore(format: format)
+        let dimensionScore: Int = getDimensionScore(dimension: format.formatDescription.dimensions)
+        let binnedScore: Int = getBinnedScore(format: format)
         let frameRateScore: Int = getFrameRateScore(format: format)
-        let mediaSubTypeScore: Int = getMediaSubTypeScore(format: format)
+        let mediaSubTypeScore: Int = getMediaSubTypeScore(format: format, dolbyOn: dolbyOn)
         let focusSystemScore: Int = getFocusSystemScore(format: format)
         
-        totalScore = dimensionScore * 100000 + frameRateScore * 100 + mediaSubTypeScore * 10 + focusSystemScore
+        totalScore = dimensionScore * 10000 + binnedScore * 1000 + frameRateScore * 100 + mediaSubTypeScore * 10 + focusSystemScore
         
-        if mediaSubTypeScore == 20 {
+        if mediaSubTypeScore == 4 {
             isDolbySupported = true
         } else {
             isDolbySupported = false
@@ -105,7 +126,7 @@ extension AVCaptureDevice {
             isVideoHDRSupported = false
         }
         
-        let scoredFormat = ScoredFormat(format: format, score: totalScore, isVideoHDRSupported: isVideoHDRSupported, isDolbySupported: isDolbySupported)
+        let scoredFormat = ScoredFormat(format: format, score: totalScore, dimensionScore: dimensionScore, frameRateScore: binnedScore, isVideoHDRSupported: isVideoHDRSupported, isDolbySupported: isDolbySupported)
         
         return scoredFormat
     }
@@ -114,7 +135,7 @@ extension AVCaptureDevice {
 extension AVCaptureDevice {
     func checkFrameRate(format: Format, frameRate: Double) throws -> Bool {
         if !hasMediaType(.video) {
-            throw AVCaptureDeviceError.invalidMdeiaType(currentMediaType: activeFormat.mediaType)
+            throw AVCaptureDeviceError.invalidMdeiaType(currentMediaType: format.mediaType)
         }
         
         guard let range = format.videoSupportedFrameRateRanges.first,
@@ -127,11 +148,11 @@ extension AVCaptureDevice {
 }
 
 extension AVCaptureDevice {
-    func getDimensionScore(format: Format) -> Int {
+    func getDimensionScore(dimension: CMVideoDimensions) -> Int {
         let unitScore = 10
         var score: Int = 0
         
-        switch (format.formatDescription.dimensions.width, format.formatDescription.dimensions.height) {
+        switch (dimension.width, dimension.height) {
         case (3840, 2160):
             score = unitScore * 4
         case (1920, 1080):
@@ -148,11 +169,26 @@ extension AVCaptureDevice {
     }
     
     func getFrameRateScore(format: Format) -> Int {
+        let unitScore = 2
+        var score = 0
         guard let range = format.videoSupportedFrameRateRanges.first else {
             return 0
         }
         
-        let score = Int(range.maxFrameRate)
+        switch range.maxFrameRate {
+        case 60:
+            score = unitScore * 4
+        case 30:
+            score = unitScore * 3
+        case 120:
+            score = unitScore * 2
+        case 240:
+            score = unitScore
+        default:
+            score = 0
+        }
+        
+//        let score = Int(range.maxFrameRate)
         
         return score
     }
@@ -173,13 +209,14 @@ extension AVCaptureDevice {
         return score
     }
     
-    func getMediaSubTypeScore(format: Format) -> Int {
+    func getMediaSubTypeScore(format: Format, dolbyOn: Bool) -> Int {
         let unitScore = 2
+        let dolbyFactor = dolbyOn ? 2 : 0
         var score = 0
         
         switch format.formatDescription.mediaSubType {
         case CMFormatDescription.MediaSubType(string: "x420"):
-            score = unitScore * 2
+            score = unitScore * dolbyFactor
         case CMFormatDescription.MediaSubType(string: "420f"):
             score = unitScore
         default:
@@ -188,11 +225,19 @@ extension AVCaptureDevice {
         
         return score
     }
+    
+    func getBinnedScore(format: Format) -> Int {
+        if format.isVideoBinned {
+            return 0
+        } else {
+            return 5
+        }
+    }
 }
 
 extension AVCaptureDevice {
     func setFrameRate(frameRate: Double) throws {
-        if try isFrameRateSupported(frameRate: frameRate) {
+        if try checkFrameRate(format: activeFormat, frameRate: frameRate) {
             try lockForConfiguration()
             
             let frameDuration = CMTimeMake(value: 1, timescale: Int32(frameRate))
@@ -206,11 +251,7 @@ extension AVCaptureDevice {
         return
     }
     
-    func isFrameRateSupported(frameRate: Double) throws -> Bool {
-        return try checkFrameRate(format: activeFormat, frameRate: frameRate)
-    }
-    
-    @available(iOS 14.0, *)
+//    @available(iOS 14.0, *)
     func setSmoothAutoFocus(enable mode: Bool) throws {
         if isSmoothAutoFocusSupported {
             try lockForConfiguration()
@@ -240,5 +281,11 @@ extension AVCaptureDevice {
         }
         
         return
+    }
+    
+    func setZoomFactor(zoomFactor: CGFloat) throws {
+        try lockForConfiguration()
+        self.videoZoomFactor = zoomFactor
+        unlockForConfiguration()
     }
 }

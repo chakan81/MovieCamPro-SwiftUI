@@ -12,23 +12,25 @@ public class CameraService: NSObject, ObservableObject {
     private let sessionQueue = DispatchQueue(label: "session Queue")
     public let captureSession = AVCaptureSession()
 
-    private let libraryManager = LibraryManager.shared
+    private let libraryManager = MovieFileManager.shared
     
     private var videoDeviceInput: AVCaptureDeviceInput!
     private var audioDeviceInput: AVCaptureDeviceInput!
     private var videoDevice: AVCaptureDevice!
     private var audioDevice: AVCaptureDevice!
     
-    private var discoverySession = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInWideAngleCamera, .builtInTripleCamera], mediaType: .video, position: .unspecified)
+    private var discoverySession = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInWideAngleCamera, .builtInUltraWideCamera, .builtInTelephotoCamera], mediaType: .video, position: .unspecified)
     private var scoredFormats: [AVCaptureDevice.ScoredFormat] = []
     
     private let movieFileOutput = AVCaptureMovieFileOutput()
     
     @Published public var activeFormatInfo: FormatInfo?
     @Published public var isRecording: Bool = false
-    @Published public var dimensions: CMVideoDimensions = CMVideoDimensions(width: 3840, height: 1920)
-    @Published public var frameRate: Double = 30.0
-    @Published public var dolbyOn: Bool = false
+    @Published public var dimensions: CMVideoDimensions = CMVideoDimensions(width: 3840, height: 2160)
+    @Published public var frameRate: Double = 120.0
+    @Published public var zoomFactor: CGFloat = 3.0
+    var zoomWeightingFactors: [String: CGFloat] = ["Wide": 1]
+    @Published public var dolbyOn: Bool = true
     
     @Published public var cameraStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
     @Published public var micStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -40,21 +42,121 @@ public class CameraService: NSObject, ObservableObject {
     public func setupSession() {
         sessionQueue.async {
             self.captureSession.sessionPreset = .high
+            self.updateZoomWeightingFactors()
+            self.setDiscoverySession()
             self.setInputDevice()
             self.addInput()
             self.scoreFormats()
-            self.setActiveFormat(dimensions: self.dimensions, frameRate: self.frameRate, dolbyOn: self.dolbyOn)
+            self.setActiveFormat(dimensions: self.dimensions, frameRate: self.frameRate)
             self.addOutput()
-//            self.setupRecording()
-//            self.printAllAvailabeFormats()
+            self.setupRecording()
             DispatchQueue.main.async {
                 self.updateAtciveFormatInfo()
             }
             
-            self.videoDevice.printFormatArray(formats: self.scoredFormats.map({ scoredFormat in
-                return scoredFormat.format
-            }))
+            self.printAllScoredFormats(useFormatInfo: true)
+            self.setZoomFactor(zoomFactor: self.zoomFactor)
         }
+    }
+    
+    func getZoomFactorSwitchOverArray() throws -> [NSNumber] {
+        let localDiscoverySession = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInTripleCamera, .builtInDualCamera, .builtInWideAngleCamera], mediaType: .video, position: .back)
+        
+        let devices = localDiscoverySession.devices
+        
+        guard let device = devices.first(where: { device in
+            device.position == .back
+        }) else { throw AVCaptureDeviceError.BackCameraNotSupported }
+        
+        let switchOverArray = device.virtualDeviceSwitchOverVideoZoomFactors
+        
+        return switchOverArray
+    }
+    
+    func updateZoomWeightingFactors() {
+        var weightingFactorArray: [String: CGFloat] = ["": 0]
+        do {
+            let array = try self.getZoomFactorSwitchOverArray()
+            let hasUltraWide = discoverySession.devices.contains(where: { device in
+                device.deviceType == AVCaptureDevice.DeviceType.builtInUltraWideCamera
+            })
+            
+            let hasTelephoto = discoverySession.devices.contains(where: { device in
+                device.deviceType == AVCaptureDevice.DeviceType.builtInTelephotoCamera
+            })
+            
+            print("First of Array: \(CGFloat(truncating: array.first!))")
+            
+            switch (hasUltraWide, hasTelephoto) {
+            case (true, true):
+                weightingFactorArray = ["UltraWide": CGFloat(truncating: array.first!), "Wide": 1, "Telephoto": CGFloat(truncating: array.first!) / CGFloat(truncating: array.last!)]
+            case (true, false):
+                weightingFactorArray = ["UltraWide": CGFloat(truncating: array.first!), "Wide": 1]
+            case (false, true):
+                weightingFactorArray = ["Wide": 1, "Telephoto": (1 / CGFloat(truncating: array.first!))]
+            case (false, false):
+                weightingFactorArray = ["Wide": 1]
+            }
+            
+            print("switchOverArray: \(array.description)")
+            print("weightingFactorArray: \(weightingFactorArray.description)")
+        } catch {
+            popError(error: error)
+        }
+        
+        self.zoomWeightingFactors = weightingFactorArray
+        
+        return
+    }
+    
+    func setZoomFactor(zoomFactor: CGFloat) {
+        var weightedZoomFactor: CGFloat = 0
+        
+        switch self.videoDevice.deviceType {
+        case .builtInUltraWideCamera:
+            weightedZoomFactor = zoomFactor * (self.zoomWeightingFactors["UltraWide"] ?? 2.0)
+        case .builtInWideAngleCamera:
+            weightedZoomFactor = zoomFactor * (self.zoomWeightingFactors["Wide"] ?? 1.0)
+        case .builtInTelephotoCamera:
+            weightedZoomFactor = zoomFactor * (self.zoomWeightingFactors["Telephoto"] ?? 0.5)
+        default:
+            weightedZoomFactor = zoomFactor
+        }
+        
+        do {
+            if weightedZoomFactor < 1.0 {
+                throw CameraServiceError.zoomFactorOutOfRange
+            }
+            try self.videoDevice.setZoomFactor(zoomFactor: weightedZoomFactor)
+        } catch {
+            popError(error: error)
+        }
+        
+        print("Video Device: \(self.videoDevice.deviceType)\nweightedZoomFactor: \(weightedZoomFactor)")
+        
+    }
+    
+    func setDiscoverySession() {
+        var deviceTypes: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
+        var telephotoZoomFactor: CGFloat = 1.0
+        
+        if let telephotoWeightingFactor = self.zoomWeightingFactors["Telephoto"] {
+            telephotoZoomFactor = 1 / telephotoWeightingFactor
+        } else {
+            telephotoZoomFactor = .infinity
+        }
+        
+        if self.zoomFactor < 1.0 {
+            deviceTypes = [.builtInUltraWideCamera, .builtInWideAngleCamera]
+        } else if self.zoomFactor >= telephotoZoomFactor {
+            deviceTypes = [.builtInTelephotoCamera, .builtInWideAngleCamera]
+        } else {
+            deviceTypes = [.builtInWideAngleCamera]
+        }
+        
+        self.discoverySession = AVCaptureDevice.DiscoverySession(deviceTypes: deviceTypes, mediaType: .video, position: .unspecified)
+        
+        return
     }
     
     func setInputDevice() {
@@ -172,7 +274,7 @@ public class CameraService: NSObject, ObservableObject {
     public func startRecording() {
         
         // make outputURL
-        guard let outputFileURL = self.libraryManager.nextFileURL() else { return }
+        guard let outputFileURL = self.libraryManager.randomVideoFileURL() else { return }
         
         if !self.isRecording {
             AudioServicesPlaySystemSoundWithCompletion(1117) {
@@ -207,7 +309,7 @@ extension CameraService: AVCaptureFileOutputRecordingDelegate {
             do {
                 try await self.libraryManager.saveVideoFile(toPhotoLibrary: outputFileURL)
             } catch {
-                print("Saving movie has something worng.")
+                self.popError(error: CameraServiceError.cannotSaveFile)
             }
             AudioServicesPlaySystemSoundWithCompletion(1118, nil)
         }
@@ -216,17 +318,18 @@ extension CameraService: AVCaptureFileOutputRecordingDelegate {
 
 extension CameraService {
     func scoreFormats() {
-        self.scoredFormats = videoDevice.scoreAndSortFormats()
+        self.scoredFormats = videoDevice.scoreAndSortFormats(dolbyOn: self.dolbyOn)
     }
     
-    func setActiveFormat(dimensions: CMVideoDimensions, frameRate: Double, dolbyOn: Bool) {
-        
-//        for i in 0...self.scoredFormats.count - 1 {
-//            if scoredFormats[i].score =
-//        }
+    func setActiveFormat(dimensions: CMVideoDimensions, frameRate: Double) {
         
         do {
-            try self.videoDevice.setActiveFormat(format: self.scoredFormats.first!.format)
+            guard let properFormat = try self.videoDevice.findProperFormat(scoredFormats: self.scoredFormats, dimension: dimensions, frameRate: frameRate) else {
+                try self.videoDevice.setActiveFormat(format: self.scoredFormats.first?.format)
+                throw AVCaptureDeviceError.unavailableFormat
+            }
+
+            try self.videoDevice.setActiveFormat(format: properFormat)
         } catch let error {
             popError(error: error)
         }
@@ -234,7 +337,7 @@ extension CameraService {
         return
     }
     
-    func updateAtciveFormatInfo() {
+    public func updateAtciveFormatInfo() {
         let activeFormatInfo = FormatInfo(format: self.videoDevice.activeFormat)
         
         self.activeFormatInfo = activeFormatInfo
@@ -242,8 +345,52 @@ extension CameraService {
         return
     }
     
-    func printAllAvailabeFormats() -> Void {
-        self.videoDevice.printAllAvailableFormats()
+    func printAllAvailabeFormats(useFormatInfo: Bool) {
+        self.videoDevice.printFormatArray(formats: self.videoDevice.formats, useFormatInfo: useFormatInfo)
+    }
+    
+    func printAllScoredFormats(useFormatInfo: Bool) {
+        self.videoDevice.printFormatArray(formats: self.scoredFormats.map({ scoredFormat in
+            return scoredFormat.format
+        }), useFormatInfo: useFormatInfo)
+    }
+}
+extension CameraService {
+    public func updateDolbyState() {
+        self.scoreFormats()
+        self.setActiveFormat(dimensions: self.dimensions, frameRate: self.frameRate)
+    }
+    
+    public func setFrameRate(frameRate: Double) {
+        do {
+            try self.videoDevice.setFrameRate(frameRate: frameRate)
+        } catch let error {
+            popError(error: error)
+        }
+    }
+    
+    public func setSmoothAutoFocus(enable: Bool) {
+        do {
+            try self.videoDevice.setSmoothAutoFocus(enable: enable)
+        } catch let error {
+            popError(error: error)
+        }
+    }
+    
+    public func setExposure(bias: Float) async {
+        do {
+            try await self.videoDevice.setExposure(EVunit: bias)
+        } catch let error {
+            popError(error: error)
+        }
+    }
+    
+    public func setHDR(isHDROn: Bool) {
+        do {
+            try self.videoDevice.setHDR(isHDROn: isHDROn)
+        } catch let error {
+            popError(error: error)
+        }
     }
 }
 
@@ -340,12 +487,18 @@ extension CameraService {
             message = "Invalide MediaType. Current MediaType is \(mediaType)."
         case AVCaptureDeviceError.unavailableFormat:
             message = "Foramat is not available"
+        case AVCaptureDeviceError.invalidVideoDimensions:
+            message = "Not a standard video dimension."
+        case AVCaptureDeviceError.BackCameraNotSupported:
+            message = "Back Camera is not supported."
         case CameraServiceError.cannotAddDeviceInput:
             message = "AVCaptureSession can not add AVCaptureDeviceInput."
         case CameraServiceError.cannotAddDeviceOutput:
             message = "AVCaptureSession can not add AVCaptureDeviceOutput."
         case CameraServiceError.captureSessionIsRunning:
             message = "CaptureSession is on running."
+        case CameraServiceError.zoomFactorOutOfRange:
+            message = "weightedZoomFactor can not be less than 1.0"
         default:
             message = error.localizedDescription
         }

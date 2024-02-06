@@ -84,3 +84,26 @@ You can configure following features manually in SwiftUI environment.
     </pre>
 
     Once you stop recording, video will be saved to Photo Library.
+        
+7. You can print all formats that device can use for testing purpose.
+    <pre>
+    <code>
+    cameraService.printAllAvailabeFormats(useFormatInfo: true)
+    cameraService.printAllScoredFormats(useFormatInfo: true)
+    guard let formatInfo = cameraService.activeFormatInfo.convertFormatInfoToString() else { return }
+    </code>
+    </pre>
+    
+    if 'useFormatInfo: Bool' is true, camera info will be rendered as simple string like
+        
+    > width: 3840, height: 1920     
+    > frame rate range: 1.0 ~ 60.0  
+    > focus system: 2   
+    > Media SubType: 'x420' 
+    
+
+    focus system 1 : contrastDetection  
+    focus system 2 : phaseDetection
+    
+    Media SubType 'x420' : High quality video. support dolby vision     
+    Media SubType '420f' : High quality video. not support dolby vision.
